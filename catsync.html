@@ -86,12 +86,15 @@
 
   /* ── mic ── */
   .meter {
+    position: relative;
     flex: 1; height: 8px; border-radius: 4px; background: var(--panel2);
     border: 1px solid var(--line); overflow: hidden; min-width: 0;
   }
   .meter i { display: block; height: 100%; width: 0; background: var(--accent2); }
   .meter.hot i { background: var(--warn); }
   .meter.clip i { background: #ff5c5c; }
+  /* where the silence threshold sits, on the same 0-100 scale the bar shows */
+  .meter b { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--warn); }
   button.rec { background: #ff4f4f; border-color: #ff4f4f; color: #2a0a0a; animation: pulse 1.4s ease-in-out infinite; }
   button.rec:hover:not(:disabled) { background: #ff6b6b; border-color: #ff6b6b; }
   @keyframes pulse { 50% { opacity: .62; } }
@@ -119,7 +122,7 @@
     background: var(--panel2); border-radius: 6px; padding: 12px; overflow: auto;
   }
   /* display size only — the canvas keeps its full export resolution */
-  #preview { image-rendering: pixelated; display: block; }
+  #preview { image-rendering: pixelated; display: block; touch-action: none; }
   #preview.fit { max-width: 100%; max-height: calc(52vh - 24px); width: auto; height: auto; }
   #preview.checker {
     background-image:
@@ -181,7 +184,8 @@
     image-rendering: pixelated; display: block; cursor: grab; touch-action: none;
     max-width: 100%; max-height: 42vh; width: auto; height: auto;
   }
-  #alignCv.drag { cursor: grabbing; }
+  /* the align canvas sets its own cursor inline — it changes with what's
+     under the pointer, and there are six of them */
   #alignCv:focus { outline: 2px solid var(--accent); outline-offset: 3px; }
   .nudge { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin: 8px 0; }
   .nudge button { padding: 5px 0; font-size: 13px; line-height: 1; }
@@ -300,11 +304,12 @@
         <label style="flex:0 0 30px;text-align:right">H</label><input type="number" id="cropH" value="0" min="1">
       </div>
       <div class="offreadout" id="cropLbl">&mdash;</div>
+      <div class="hint" style="margin-top:6px">Or drag it <strong>on the preview</strong> &mdash; hit Play and reframe against the animation running. Any <strong>edge or corner</strong> resizes that side, <strong>shift&#8209;drag</strong> moves the whole cut without resizing it. Works on the align canvas too. While you're live, the pop&#8209;out reframes as you go.</div>
       <div class="checkrow" style="margin-top:8px">
         <input type="checkbox" id="lockView">
         <label for="lockView" style="flex:none">Lock the cut</label>
       </div>
-      <div class="hint" style="margin-top:-2px">While unlocked the preview shows the <em>whole</em> frame with the viewport drawn as a guide, so nothing is hidden while you're still moving sprites around. Lock it to see the actual cut. <strong>Exports always apply the viewport either way.</strong></div>
+      <div class="hint" style="margin-top:-2px">While unlocked the preview shows the <em>whole</em> frame with the viewport drawn as a guide &mdash; nothing is hidden while you're still moving sprites around, and the guide is what you drag. Lock it to see the actual cut; there's nothing outside it to grab then. <strong>Exports always apply the viewport either way.</strong></div>
       <button id="fitCrop" style="margin-top:8px">Fit to content</button>
       <button id="fullCrop">Reset to full cell</button>
     </div>
@@ -316,6 +321,28 @@
       <button id="expWebm" disabled style="margin-top:10px">Export WebM</button>
       <div class="hint"><strong style="color:var(--warn)">No transparency.</strong> Browsers can't record an alpha channel, so the key color is baked in as a solid background &mdash; chroma&#8209;key it in your editor. Records in real time.</div>
       <div class="msg" id="expMsg"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Live &mdash; mic straight to a pop&#8209;out window</h2>
+      <button class="primary" id="liveBtn" disabled>Go live</button>
+      <div class="row" style="margin-top:9px">
+        <div class="meter" id="liveMeter"><i></i><b></b></div>
+        <span class="val" id="liveIdx" style="flex:0 0 58px">&mdash;</span>
+      </div>
+      <div class="row">
+        <label>Background</label>
+        <select id="liveBg">
+          <option value="key">Key color</option>
+          <option value="green">Green &mdash; #00b140</option>
+          <option value="black">Black</option>
+          <option value="checker">Checker (see alpha)</option>
+        </select>
+      </div>
+      <button id="liveCal">Set threshold from room tone</button>
+      <div class="hint">No audio file needed &mdash; this reads the mic and drives the cat in realtime, in a window of its own you can hand to OBS as a <strong>window capture</strong> and chroma&#8209;key. The amber tick on the meter is the silence threshold: your voice should cross it, your room shouldn't.</div>
+      <div class="hint">In that window <strong>&ndash;</strong> hides the bar and shrinks to just the cat, <strong>Fit</strong> sizes it 1:1, <strong>h</strong> toggles and <strong>Esc</strong> stops. Drag its edge to scale. Keep it somewhere visible &mdash; a browser stops drawing a window that's minimized or completely covered.</div>
+      <div class="msg" id="liveMsg"></div>
     </div>
   </div>
 
@@ -991,6 +1018,30 @@ function autoThreshold() {
 const MAX_TAKE = 10 * 60;    // seconds; a forgotten tab shouldn't eat all your RAM
 let rec = null;              // live recording session, null when idle
 
+// All three of these fight the thing we're measuring. Auto gain flattens loud
+// against quiet, which is the entire lip-sync signal. Noise suppression gates
+// room tone down to digital silence, which turns the threshold into a cliff
+// with nothing sensible to sit on. Echo cancellation is for calls. Off, off,
+// off — a raw take reads better, and live mode wants the same raw signal.
+const MIC_CONSTRAINTS = { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+
+function micError(e) {
+  const n = e && e.name;
+  return n === "NotAllowedError" ? "Mic permission was denied. Allow it (the icon in the address bar) and try again." :
+    n === "NotFoundError" || n === "DevicesNotFoundError" ? "No microphone found." :
+    n === "NotReadableError" ? "The mic is busy — another app or tab has it." :
+    "Couldn't open the mic" + (n ? ` (${n}).` : ".");
+}
+
+function noMicHere() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    return location.protocol === "file:"
+      ? "This browser won't open the mic on a file:// page. Use the hosted copy at alejandruxxug.github.io/Catsync, or drag a file in."
+      : "This browser won't give the page a microphone. Drag in a WAV or MP3 instead.";
+  }
+  return null;
+}
+
 function pickAudioMime() {
   if (!window.MediaRecorder) return null;
   const want = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"];
@@ -1000,42 +1051,33 @@ function pickAudioMime() {
   return "";                 // let the browser pick
 }
 
-function setMeter(pct, peak) {
-  const m = $("meter");
+/* `m` is the meter element — the panel has one, and so does the live pop-out,
+   which lives in a different document. `thr` positions the threshold tick, on
+   meters that have one. */
+function setMeter(m, pct, peak, thr) {
+  if (!m) return;
   m.firstElementChild.style.width = clamp(pct, 0, 100) + "%";
   m.classList.toggle("hot", peak > 0.7 && peak <= 0.98);
   m.classList.toggle("clip", peak > 0.98);
+  const tick = m.querySelector("b");
+  if (tick) tick.style.left = clamp(thr || 0, 0, 100) + "%";
 }
 
 async function startRecording() {
   if (rec) return stopRecording();
 
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    return err("input", location.protocol === "file:"
-      ? "This browser won't open the mic on a file:// page. Use the hosted copy at alejandruxxug.github.io/Catsync, or drag a file in."
-      : "This browser won't give the page a microphone. Drag in a WAV or MP3 instead.");
-  }
+  const no = noMicHere();
+  if (no) return err("input", no);
   if (!window.MediaRecorder) {
     return err("input", "This browser has no MediaRecorder, so it can't record. Drag in a WAV or MP3 instead.");
   }
+  if (live) stopLive();          // one mic, one job
 
   let stream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      // All three of these fight the thing we're measuring. Auto gain flattens
-      // loud against quiet, which is the entire lip-sync signal. Noise
-      // suppression gates room tone down to digital silence, which turns the
-      // threshold into a cliff with nothing sensible to sit on. Echo
-      // cancellation is for calls. Off, off, off — a raw take reads better.
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
-    });
+    stream = await navigator.mediaDevices.getUserMedia({ audio: MIC_CONSTRAINTS });
   } catch (e) {
-    const n = e && e.name;
-    return err("input",
-      n === "NotAllowedError" ? "Mic permission was denied. Allow it (the icon in the address bar) and hit Record again." :
-      n === "NotFoundError" || n === "DevicesNotFoundError" ? "No microphone found." :
-      n === "NotReadableError" ? "The mic is busy — another app or tab has it." :
-      "Couldn't open the mic" + (n ? ` (${n}).` : "."));
+    return err("input", micError(e));
   }
 
   const a = $("audioEl");
@@ -1082,7 +1124,7 @@ async function startRecording() {
       if (Math.abs(v) > peak) peak = Math.abs(v);
     }
     const db = 20 * Math.log10(Math.sqrt(sum / frame.length) + 1e-9);
-    setMeter(((db + 60) / 60) * 100, peak);          // -60dB..0dB across the bar
+    setMeter($("meter"), ((db + 60) / 60) * 100, peak);   // -60dB..0dB across the bar
 
     const t = (performance.now() - rec.t0) / 1000;
     $("recTime").textContent = t.toFixed(1) + "s";
@@ -1104,7 +1146,7 @@ function stopRecording() {
   r.stream.getTracks().forEach(t => t.stop());
   $("recBtn").classList.remove("rec");
   $("recBtn").innerHTML = "&#9679; Record";
-  setMeter(0, 0);
+  setMeter($("meter"), 0, 0);
 }
 
 async function finishRecording(chunks, mime) {
@@ -1152,6 +1194,26 @@ function bandOf(v, thr, N) {
   return clamp(1 + Math.floor(t * (N - 1)), 1, N - 1);
 }
 
+/* One frame of the state machine. `st` is {cur, held} and is mutated in place,
+   so this works the same whether it's walking a decoded file or being fed one
+   live frame at a time — which is the point of pulling it out. The two paths
+   drifting apart would mean a stream that doesn't match its own exports. */
+function stepMap(st, v, thr, hold, N) {
+  let want = bandOf(v, thr, N);
+
+  // hysteresis: must clear the boundary by a margin before switching,
+  // otherwise a value sitting on the edge chatters between two mouths
+  if (want > st.cur && bandOf(v - HYST, thr, N) <= st.cur) want = st.cur;
+  else if (want < st.cur && bandOf(v + HYST, thr, N) >= st.cur) want = st.cur;
+
+  // minimum hold — the single most important step. without it, strobing.
+  if (want !== st.cur && st.held < hold) { want = st.cur; }
+
+  if (want === st.cur) st.held++;
+  else { st.cur = want; st.held = 1; }
+  return st.cur;
+}
+
 function remap() {
   if (!S.rms || !S.keyed.length) return;
   const thr = parseInt($("thr").value, 10);
@@ -1160,23 +1222,8 @@ function remap() {
   const len = S.rms.length;
   const map = new Int16Array(len);
 
-  let cur = 0, heldFor = 0;
-  for (let f = 0; f < len; f++) {
-    const v = S.rms[f];
-    let want = bandOf(v, thr, N);
-
-    // hysteresis: must clear the boundary by a margin before switching,
-    // otherwise a value sitting on the edge chatters between two mouths
-    if (want > cur && bandOf(v - HYST, thr, N) <= cur) want = cur;
-    else if (want < cur && bandOf(v + HYST, thr, N) >= cur) want = cur;
-
-    // minimum hold — the single most important step. without it, strobing.
-    if (want !== cur && heldFor < hold) { want = cur; }
-
-    if (want === cur) heldFor++;
-    else { cur = want; heldFor = 1; }
-    map[f] = cur;
-  }
+  const st = { cur: 0, held: 0 };
+  for (let f = 0; f < len; f++) map[f] = stepMap(st, S.rms[f], thr, hold, N);
 
   S.mapping = map;
   let closed = 0;
@@ -1222,18 +1269,38 @@ function syncCropInputs() {
   $("cropLbl").textContent = `${S.crop.w}×${S.crop.h} px`;
 }
 
-function readCropInputs() {
-  if (!S.crop) return;
+/* The one place the cut is clamped and written. Typing in the boxes and
+   dragging it on the align canvas both come through here, so they can't
+   disagree about what's allowed. */
+function setCrop(x, y, w, h) {
   const cw = S.cellW, ch = S.cellH;
-  const x = clamp(parseInt($("cropX").value, 10) || 0, -cw, cw);
-  const y = clamp(parseInt($("cropY").value, 10) || 0, -ch, ch);
-  const w = clamp(parseInt($("cropW").value, 10) || 1, 1, cw * 3);
-  const h = clamp(parseInt($("cropH").value, 10) || 1, 1, ch * 3);
-  S.crop = { x, y, w, h };
+  S.crop = {
+    x: clamp(Math.round(x), -cw, cw),
+    y: clamp(Math.round(y), -ch, ch),
+    w: clamp(Math.round(w), 1, cw * 3),
+    h: clamp(Math.round(h), 1, ch * 3),
+  };
   syncCropInputs();
   resizePreview();
   renderAlign();
   drawFrameAt(currentFrame());
+}
+
+function readCropInputs() {
+  if (!S.crop) return;
+  setCrop(
+    parseInt($("cropX").value, 10) || 0,
+    parseInt($("cropY").value, 10) || 0,
+    parseInt($("cropW").value, 10) || 1,
+    parseInt($("cropH").value, 10) || 1);
+}
+
+/* The live pop-out repaints itself at the new size on its own — paintLive
+   notices the canvas is the wrong shape — but the window around it doesn't.
+   Refit once the gesture is over rather than on every keystroke, or the window
+   jumps about while you're still deciding. */
+function afterCutChange() {
+  if (live) fitLiveWindow();
 }
 
 /* Union bounding box of every frame's opaque pixels, offsets applied.
@@ -1278,6 +1345,7 @@ function resizePreview() {
   $("emptyNote").style.display = "none";
   cv.classList.toggle("checker", $("checker").checked);
   cv.classList.toggle("fit", $("fitView").checked);
+  measure(cv);
   // always report the exported size, never the preview's
   $("stOut").textContent = `${w}×${h}`;
 }
@@ -1296,20 +1364,10 @@ function drawFrameAt(f) {
   const cx = locked ? c.x : 0, cy = locked ? c.y : 0;
   x.drawImage(spr, (o.dx - cx) * s, (o.dy - cy) * s, spr.width * s, spr.height * s);
 
-  // unlocked: the viewport is only a guide, so show where the cut will fall
-  if (!locked && (c.x !== 0 || c.y !== 0 || c.w !== S.cellW || c.h !== S.cellH)) {
-    const rx = c.x * s, ry = c.y * s, rw = c.w * s, rh = c.h * s;
-    x.save();
-    x.beginPath();
-    x.rect(0, 0, cv.width, cv.height);
-    x.rect(rx, ry, rw, rh);
-    x.fillStyle = "#0b0d1099";
-    x.fill("evenodd");
-    x.restore();
-    x.strokeStyle = "#4fd1c5";
-    x.lineWidth = Math.max(1, Math.round(s / 2));
-    x.strokeRect(rx + .5, ry + .5, rw - 1, rh - 1);
-  }
+  // Unlocked: the viewport is only a guide, so show where the cut will fall —
+  // and it's draggable right here, against the animation as it plays. Locked,
+  // the preview *is* the cut, so there's nothing outside it to grab.
+  if (!locked) drawCutGuide(x, cv, s, S.cellW, S.cellH);
 
   $("frameLbl").textContent = S.mapping ? `frame ${f} · sprite ${idx}` : "";
 }
@@ -1402,6 +1460,7 @@ function renderAlign() {
   $("alignEmpty").style.display = "none";
   cv.width = sw * alignZoom;
   cv.height = sh * alignZoom;
+  measure(cv);
 
   const x = cv.getContext("2d");
   x.imageSmoothingEnabled = false;
@@ -1431,11 +1490,59 @@ function renderAlign() {
   x.moveTo(0, cv.height / 2); x.lineTo(cv.width, cv.height / 2);
   x.stroke();
 
-  // the exported viewport: dim what falls outside it
+  // the exported viewport — drag any edge or corner of it to reshape the cut
+  if (S.crop) drawCutGuide(x, cv, alignZoom, sw, sh);
+
+  $("selLbl").textContent = ri < 0 ? `${S.sel} · reference` : `${S.sel} vs ${ri}`;
+  $("offLbl").innerHTML = `dx ${o.dx} &nbsp; dy ${o.dy}` +
+    ($("moveAll").checked ? ` <span style="color:var(--dim)">· all</span>` : "");
+  // Only auto-align needs a reference frame. Moving is always allowed.
+  $("autoOne").disabled = ri < 0;
+}
+
+/* ── dragging the cut ─────────────────────────────────────
+   The viewport can be dragged on two surfaces: the align canvas, where it sits
+   next to the onion skin, and the preview, where you can reframe against the
+   animation as it plays. Both are sprite pixels drawn at some integer zoom, so
+   they share all of this and differ only in that zoom and in what a drag
+   *outside* the cut means. */
+
+/* How many canvas pixels one CSS pixel is. Measured rather than assumed,
+   because both canvases keep their full resolution and are scaled down by CSS
+   to fit. Cached: drawFrameAt runs every animation frame and a layout read in
+   that loop is not free. Pointer handlers re-measure, since they're user-paced
+   and being right matters more there. */
+const pxRatio = new WeakMap();
+function measure(cv) {
+  const r = cv.getBoundingClientRect();
+  pxRatio.set(cv, cv.width / (r.width || cv.width));
+  return pxRatio.get(cv);
+}
+const ratioOf = cv => pxRatio.get(cv) || 1;
+
+/* The viewport's four corner grips, in canvas pixels. Sized off how big the
+   canvas is actually being displayed, so a grip stays about 9px on screen
+   whether a 48px sprite is zoomed 4x or a 1024px one is scaled down to fit.
+   Kept inside the canvas too: a cut larger than the cell has corners off in
+   space, and without this there'd be nothing left to grab. */
+function cropCorners(cv, zoom) {
+  const s = 9 * ratioOf(cv);
   const c = S.crop;
-  if (c && (c.x !== 0 || c.y !== 0 || c.w !== sw || c.h !== sh)) {
-    const rx = c.x * alignZoom, ry = c.y * alignZoom,
-          rw = c.w * alignZoom, rh = c.h * alignZoom;
+  const L = c.x * zoom, T = c.y * zoom;
+  const R = (c.x + c.w) * zoom, B = (c.y + c.h) * zoom;
+  const put = (x, y) => ({
+    x: clamp(x, 0, Math.max(0, cv.width - s)),
+    y: clamp(y, 0, Math.max(0, cv.height - s)),
+  });
+  return { s, nw: put(L, T), ne: put(R - s, T), sw: put(L, B - s), se: put(R - s, B - s) };
+}
+
+/* Draw the cut as a guide: dim what falls outside, outline it, and mark the
+   four grips. Shared so the two surfaces can't end up showing it differently. */
+function drawCutGuide(x, cv, zoom, cellW, cellH) {
+  const c = S.crop;
+  const rx = c.x * zoom, ry = c.y * zoom, rw = c.w * zoom, rh = c.h * zoom;
+  if (c.x !== 0 || c.y !== 0 || c.w !== cellW || c.h !== cellH) {
     x.save();
     x.beginPath();
     x.rect(0, 0, cv.width, cv.height);
@@ -1443,15 +1550,110 @@ function renderAlign() {
     x.fillStyle = "#0b0d10aa";
     x.fill("evenodd");
     x.restore();
-    x.strokeStyle = "#4fd1c5"; x.lineWidth = 1;
-    x.strokeRect(rx + .5, ry + .5, rw - 1, rh - 1);
+  }
+  x.strokeStyle = "#4fd1c5";
+  x.lineWidth = Math.max(1, Math.round(ratioOf(cv)));
+  x.strokeRect(rx + .5, ry + .5, rw - 1, rh - 1);
+  const H = cropCorners(cv, zoom);
+  x.fillStyle = "#4fd1c5";
+  for (const k of ["nw", "ne", "sw", "se"]) x.fillRect(H[k].x, H[k].y, H.s, H.s);
+}
+
+/* Which part of the cut a point lands on, and for a resize, which sides it
+   grabbed. Corner grips are tested first and in canvas pixels, because they
+   get clamped into view — the edges they belong to may be off-canvas. */
+function cutHit(cv, zoom, e) {
+  if (!S.crop || !S.keyed.length) return { kind: "outside" };
+  const r = cv.getBoundingClientRect();
+  const zx = measure(cv);
+  const cx = (e.clientX - r.left) * zx, cy = (e.clientY - r.top) * zx;
+  const H = cropCorners(cv, zoom);
+  const inGrip = q => cx >= q.x && cx <= q.x + H.s && cy >= q.y && cy <= q.y + H.s;
+  for (const [k, f] of [["nw", { n: 1, w: 1 }], ["ne", { n: 1, e: 1 }],
+                        ["sw", { s: 1, w: 1 }], ["se", { s: 1, e: 1 }]]) {
+    if (inGrip(H[k])) return e.shiftKey ? { kind: "move" } : { kind: "resize", ...f };
   }
 
-  $("selLbl").textContent = ri < 0 ? `${S.sel} · reference` : `${S.sel} vs ${ri}`;
-  $("offLbl").innerHTML = `dx ${o.dx} &nbsp; dy ${o.dy}` +
-    ($("moveAll").checked ? ` <span style="color:var(--dim)">· all</span>` : "");
-  // Only auto-align needs a reference frame. Moving is always allowed.
-  $("autoOne").disabled = ri < 0;
+  const k = zx / zoom;                           // css px -> sprite px
+  const px = (e.clientX - r.left) * k, py = (e.clientY - r.top) * k;
+  const c = S.crop, tol = 9 * k;                 // same grab area as a grip
+  const dL = Math.abs(px - c.x), dR = Math.abs(px - (c.x + c.w));
+  const dT = Math.abs(py - c.y), dB = Math.abs(py - (c.y + c.h));
+  const onBox = px >= c.x - tol && px <= c.x + c.w + tol
+             && py >= c.y - tol && py <= c.y + c.h + tol;
+  if (!onBox) return { kind: "outside" };
+  // on a cut only a pixel or two wide both edges are in reach — take the nearer,
+  // or dragging one would fight the other
+  const w = dL <= tol && dL <= dR, ee = dR <= tol && dR < dL;
+  const n = dT <= tol && dT <= dB, s = dB <= tol && dB < dT;
+  if (!(w || ee || n || s)) return { kind: "outside" };
+  return e.shiftKey ? { kind: "move" } : { kind: "resize", w, e: ee, n, s };
+}
+
+function cursorForCut(h) {
+  if (h.kind === "move") return "move";
+  if (h.kind !== "resize") return "";
+  if ((h.n && h.w) || (h.s && h.e)) return "nwse-resize";
+  if ((h.n && h.e) || (h.s && h.w)) return "nesw-resize";
+  return (h.w || h.e) ? "ew-resize" : "ns-resize";
+}
+
+/* Worked as four edges rather than x/y/w/h: dragging the left edge must leave
+   the right one exactly where it is, and clamping x and w separately would
+   slide it. An edge is stopped one pixel short of its opposite instead of
+   being allowed through into a mirrored rect. */
+function applyCutDrag(mode, start, ddx, ddy) {
+  if (mode.kind === "move") {
+    setCrop(start.x + ddx, start.y + ddy, start.w, start.h);
+    return;
+  }
+  const cw = S.cellW, ch = S.cellH;
+  let l = start.x, t = start.y, r = start.x + start.w, b = start.y + start.h;
+  if (mode.w) l = clamp(l + ddx, -cw, r - 1);
+  if (mode.e) r = clamp(r + ddx, l + 1, l + cw * 3);
+  if (mode.n) t = clamp(t + ddy, -ch, b - 1);
+  if (mode.s) b = clamp(b + ddy, t + 1, t + ch * 3);
+  setCrop(l, t, r - l, b - t);
+}
+
+/* `other` is what a drag that misses the cut does on this surface — the align
+   canvas moves the sprite, the preview does nothing. */
+function wireCutDrag(cv, zoomOf, enabled, other) {
+  let mode = null, sx = 0, sy = 0, startCrop = null, startOther = null;
+  let cursor = null;
+  const setCursor = c => { if (c !== cursor) { cv.style.cursor = c; cursor = c; } };
+  const hit = e => (enabled() ? cutHit(cv, zoomOf(), e) : { kind: "outside" });
+
+  cv.addEventListener("pointerdown", e => {
+    mode = hit(e);
+    if (mode.kind === "outside" && !other) { mode = null; return; }
+    setCursor(mode.kind === "outside" ? (other.cursor || "") : cursorForCut(mode));
+    cv.setPointerCapture(e.pointerId);
+    sx = e.clientX; sy = e.clientY;
+    startCrop = S.crop ? { ...S.crop } : null;
+    startOther = mode.kind === "outside" && other ? other.start() : null;
+    if (cv.focus) cv.focus();
+  });
+
+  cv.addEventListener("pointermove", e => {
+    if (!mode) { setCursor(cursorForCut(hit(e))); return; }   // show what grabbing here would do
+    const k = ratioOf(cv) / zoomOf();                          // css px -> sprite px
+    const ddx = Math.round((e.clientX - sx) * k);
+    const ddy = Math.round((e.clientY - sy) * k);
+    if (mode.kind === "outside") other.move(startOther, ddx, ddy);
+    else if (startCrop) applyCutDrag(mode, startCrop, ddx, ddy);
+  });
+
+  const end = () => {
+    if (!mode) return;
+    const wasCut = mode.kind !== "outside";
+    mode = null;
+    setCursor("");
+    if (wasCut) afterCutChange();
+  };
+  cv.addEventListener("pointerup", end);
+  cv.addEventListener("pointercancel", end);
+  cv.addEventListener("pointerleave", () => { if (!mode) setCursor(""); });
 }
 
 /* Keep a frame reachable — dragged far enough it leaves the cell entirely and
@@ -2106,6 +2308,352 @@ async function exportWebM() {
 }
 
 /* ══════════════════════════════════════════════════════════
+   6b. live — the mic driving the cat in realtime, in a window
+       of its own, so it can sit on a stream instead of going
+       through an editor first
+   ══════════════════════════════════════════════════════════ */
+
+/* analyze() normalizes every frame against the 95th percentile of the whole
+   file. Live has no whole file, so the reference is a peak follower: it rises
+   toward a loud frame and falls back slowly. Both ends of that are load-bearing.
+
+   The attack is soft — a quarter of the way per frame — so one door slam doesn't
+   set the bar for the next ten seconds, which is the thing the 95th percentile
+   buys the batch path. And the floor is a plausible speaking level rather than
+   silence: let the reference decay all the way down in a quiet room and it
+   renormalizes the room's own hiss up to "shouting", and the mouth flaps at
+   nothing. */
+const LIVE_REF_MIN = -20;     // dB — the reference never falls below this
+const LIVE_REF_DECAY = 2;     // dB per second
+const LIVE_ATTACK = 0.25;     // fraction of the way toward a louder frame
+
+let live = null;              // live session, null when off
+
+const LIVE_DOC = `<!doctype html><meta charset="utf-8"><title>catsync — live</title><style>
+html,body{height:100%;margin:0;overflow:hidden;background:#0e1014;color:#e6e9ef;
+  font:12px/1.4 ui-sans-serif,-apple-system,"SF Pro Text",Segoe UI,sans-serif;}
+body{display:flex;flex-direction:column;}
+#stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;overflow:hidden;}
+#stage.checker{background-image:
+  linear-gradient(45deg,#33383f 25%,transparent 25%),
+  linear-gradient(-45deg,#33383f 25%,transparent 25%),
+  linear-gradient(45deg,transparent 75%,#33383f 75%),
+  linear-gradient(-45deg,transparent 75%,#33383f 75%);
+  background-size:16px 16px;background-position:0 0,0 8px,8px -8px,-8px 0;}
+/* fills the window rather than only shrinking to it: an OS window can't go
+   below about 100px, so a small sprite would otherwise sit marooned in a
+   corner. Drag the window to any size and the cat follows. */
+#cat{image-rendering:pixelated;display:block;width:100%;height:100%;object-fit:contain;}
+#bar{display:flex;align-items:center;gap:8px;padding:6px 8px;background:#1c1f25;border-top:1px solid #2e333c;}
+#meter{position:relative;flex:1;min-width:0;height:8px;border-radius:4px;background:#23272f;
+  border:1px solid #2e333c;overflow:hidden;}
+#meter i{display:block;height:100%;width:0;background:#4fd1c5;}
+#meter.hot i{background:#f0b429;}
+#meter.clip i{background:#ff5c5c;}
+#meter b{position:absolute;top:0;bottom:0;width:2px;background:#f0b429;}
+#idx{flex:0 0 auto;color:#8b93a1;font-variant-numeric:tabular-nums;}
+#bar button{border:1px solid #2e333c;background:#23272f;color:#e6e9ef;font:inherit;
+  border-radius:4px;padding:3px 9px;cursor:pointer;}
+#bar button:hover{background:#2c313a;}
+body.min #bar{display:none;}
+#restore{display:none;position:fixed;right:5px;bottom:5px;border:0;border-radius:4px;
+  background:#1c1f25cc;color:#e6e9ef;font:inherit;padding:2px 9px;cursor:pointer;
+  opacity:0;transition:opacity .15s;}
+body.min #restore{display:block;}
+body.min:hover #restore{opacity:.9;}
+</style>
+<div id="stage"><canvas id="cat" width="2" height="2"></canvas></div>
+<div id="bar"><div id="meter"><i></i><b></b></div><span id="idx">&mdash;</span>
+<button id="fit" title="Size the window to the cat (f)">Fit</button>
+<button id="min" title="Hide this bar and shrink to the cat (h)">&ndash;</button></div>
+<button id="restore" title="Show the bar (h)">&#9652;</button>`;
+
+function openLiveWindow(w, h) {
+  const feat = "popup=yes,menubar=no,toolbar=no,location=no,status=no,scrollbars=no,resizable=yes"
+    + `,width=${Math.round(clamp(w || 320, 160, 1600))},height=${Math.round(clamp(h || 240, 120, 1200)) + 34}`;
+  let pop = null;
+  try { pop = window.open("", "catsyncLive", feat); } catch (e) {}
+  if (!pop) return null;
+  pop.document.open();
+  pop.document.write(LIVE_DOC);
+  pop.document.close();
+  return pop;
+}
+
+async function startLive() {
+  if (live) return stopLive("Live stopped.");
+  if (!S.keyed.length) return err("live", "Load a sprite sheet first — live mode needs the frames, not a file.");
+  const no = noMicHere();
+  if (no) return err("live", no);
+  if (rec) stopRecording();                 // one mic, one job
+
+  // Opened here, inside the click, and deliberately before the getUserMedia
+  // await: a window.open that runs after an await has lost the user gesture
+  // that justified it, and every browser blocks it.
+  const [w0, h0] = spriteSize();
+  const pop = openLiveWindow(w0, h0);
+  if (!pop) return err("live", "The browser blocked the pop-out window. Allow pop-ups for this page, then hit Go live again.");
+
+  // playback would come out of the speakers and straight back into the mic
+  const a = $("audioEl");
+  if (!a.paused) { a.pause(); $("playBtn").textContent = "Play"; stopLoop(); }
+
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: MIC_CONSTRAINTS });
+  } catch (e) {
+    pop.close();
+    return err("live", micError(e));
+  }
+  if (pop.closed) {                          // closed while the permission prompt was up
+    stream.getTracks().forEach(t => t.stop());
+    return;
+  }
+
+  const c = ctx();
+  if (c.state === "suspended") { try { await c.resume(); } catch (e) {} }
+
+  // Meter and mapping only. The mic is never connected to the destination —
+  // that's a speaker-to-mic feedback loop, and it's loud.
+  const src = c.createMediaStreamSource(stream);
+  const an = c.createAnalyser();
+  // one analysis window per output frame, which is what analyze() does to a
+  // file. fftSize has to be a power of two, so take the nearest one.
+  an.fftSize = clamp(1 << Math.round(Math.log2(c.sampleRate / (S.fps || 30))), 256, 4096);
+  an.smoothingTimeConstant = 0;              // we do our own smoothing, on the reference
+  src.connect(an);
+
+  const cv = pop.document.getElementById("cat");
+  live = {
+    win: pop, stream, src, an,
+    buf: new Float32Array(an.fftSize),
+    cv, cx: cv.getContext("2d"),
+    st: { cur: 0, held: 99 },                // held high: the first frame may change freely
+    ref: LIVE_REF_MIN, v: 0, peak: 0,
+    bg: null, cal: null, min: false,
+    tPrev: 0, tFrame: 0, raf: 0, beat: 0, gen: 0,
+  };
+  live.cx.imageSmoothingEnabled = false;
+
+  wireLiveWindow(pop);
+  applyLiveBg();
+  fitLiveWindow();
+
+  $("liveBtn").classList.add("rec");
+  $("liveBtn").textContent = "Stop live";
+
+  live.beat = setInterval(() => {
+    if (!live) return;
+    if (!live.win || live.win.closed) return stopLive("Live window closed.");
+    // a window the OS has minimised or fully covered stops running rAF; when it
+    // comes back the pending callback may never fire, so re-arm rather than hang
+    if (performance.now() - live.tPrev > 2000) armLiveFrame();
+  }, 1000);
+  armLiveFrame();
+  calibrateLive(true);   // same reflex as autoThreshold() on a new file
+}
+
+// Driven by the pop-out's own rAF, not this page's. A background tab is
+// throttled to about 1fps, and the entire point is that this page can sit
+// behind OBS while the cat keeps moving.
+const liveRaf = (w, fn) => (w.requestAnimationFrame ? w.requestAnimationFrame(fn) : requestAnimationFrame(fn));
+
+function armLiveFrame() {
+  if (!live || !live.win || live.win.closed) return;
+  const w = live.win;
+  try { (w.cancelAnimationFrame || cancelAnimationFrame).call(w, live.raf); } catch (e) {}
+  const now = performance.now();
+  live.tPrev = now;
+  live.tFrame = now;
+  // The watchdog re-arms a chain that stopped firing while the window was
+  // hidden, and cancelling a callback in a hidden window isn't reliable — so
+  // every chain carries the generation it was started in and a superseded one
+  // retires itself. Two chains alive at once would step the mapping twice per
+  // frame, which is exactly the strobing min-hold exists to prevent.
+  const gen = ++live.gen;
+  const loop = () => { if (live && live.gen === gen) liveFrame(loop); };
+  live.raf = liveRaf(w, loop);
+}
+
+function liveFrame(loop) {
+  if (!live) return;
+  const w = live.win;
+  if (!w || w.closed) return stopLive("Live window closed.");
+  live.raf = liveRaf(w, loop);
+
+  const now = performance.now();
+  const dt = Math.min(0.25, (now - live.tPrev) / 1000);
+  live.tPrev = now;
+
+  const b = live.buf;
+  live.an.getFloatTimeDomainData(b);
+  let sum = 0, peak = 0;
+  for (let i = 0; i < b.length; i++) {
+    const s = b[i];
+    sum += s * s;
+    const a = s < 0 ? -s : s;
+    if (a > peak) peak = a;
+  }
+  const db = 20 * Math.log10(Math.sqrt(sum / b.length) + 1e-9);
+
+  if (db > live.ref) live.ref += (db - live.ref) * LIVE_ATTACK;
+  else live.ref -= LIVE_REF_DECAY * dt;
+  if (live.ref < LIVE_REF_MIN) live.ref = LIVE_REF_MIN;
+
+  live.v = clamp(((db - DB_FLOOR) / (live.ref - DB_FLOOR)) * 100, 0, 100);
+  live.peak = peak;
+  if (live.cal) live.cal.push(live.v);
+
+  // Step the mapping on the fps grid, not the display's — otherwise "min hold
+  // 2" means 2/60s on one machine and 2/30s on another, and the same settings
+  // that look right here would look wrong in an export.
+  const step = 1000 / (S.fps || 30);
+  if (now - live.tFrame > 500) live.tFrame = now - step;      // resync after a stall
+  const thr = parseInt($("thr").value, 10), hold = parseInt($("hold").value, 10);
+  let ticks = 0;
+  while (now - live.tFrame >= step && ticks < 8) {
+    live.tFrame += step;
+    ticks++;
+    stepMap(live.st, live.v, thr, hold, S.keyed.length);
+  }
+
+  if (ticks) paintLive();
+  updateLiveMeters();
+}
+
+function paintLive() {
+  if (!live || !S.keyed.length || !S.crop) return;
+  const [w, h] = spriteSize();
+  if (!w || !h) return;
+  const cv = live.cv, x = live.cx;
+  if (cv.width !== w || cv.height !== h) {      // scale or viewport moved under us
+    cv.width = w; cv.height = h;
+    x.imageSmoothingEnabled = false;
+  }
+  x.clearRect(0, 0, w, h);
+  if (live.bg) { x.fillStyle = live.bg; x.fillRect(0, 0, w, h); }
+
+  const i = clamp(live.st.cur, 0, S.keyed.length - 1);
+  const spr = S.keyed[i], o = off(i), c = S.crop;
+  const s = parseInt($("scale").value, 10);
+  // live is an output, so the viewport always applies, exactly like an export
+  x.drawImage(spr, (o.dx - c.x) * s, (o.dy - c.y) * s, spr.width * s, spr.height * s);
+}
+
+/* A solid background is painted onto the canvas rather than left to CSS, so
+   what OBS captures is what the WebM export would have baked in. Checker is the
+   one exception — it's for eyeballing the alpha, not for capturing. */
+function applyLiveBg() {
+  if (!live || !live.win || live.win.closed) return;
+  const mode = $("liveBg").value;
+  live.bg = mode === "key" ? $("key").value
+    : mode === "green" ? "#00b140"
+    : mode === "black" ? "#000000" : null;
+  const stage = live.win.document.getElementById("stage");
+  if (stage) {
+    stage.classList.toggle("checker", live.bg === null);
+    stage.style.background = live.bg || "";     // "" so the checker class shows through
+  }
+  paintLive();
+}
+
+function updateLiveMeters() {
+  const v = live ? live.v : 0, peak = live ? live.peak : 0;
+  const thr = parseInt($("thr").value, 10);
+  setMeter($("liveMeter"), v, peak, thr);
+  $("liveIdx").textContent = live ? "sprite " + live.st.cur : "—";
+  if (!live || !live.win || live.win.closed) return;
+  const d = live.win.document;
+  setMeter(d.getElementById("meter"), v, peak, thr);
+  const il = d.getElementById("idx");
+  if (il) il.textContent = "sprite " + live.st.cur;
+}
+
+/* The pop-out has no script of its own — it's same-origin and shares this
+   realm, so it's wired from here. */
+function wireLiveWindow(pop) {
+  const d = pop.document;
+  const setMin = on => {
+    if (!live) return;
+    live.min = on;
+    d.body.classList.toggle("min", on);
+    fitLiveWindow();
+  };
+  d.getElementById("min").onclick = () => setMin(true);
+  d.getElementById("restore").onclick = () => setMin(false);
+  d.getElementById("fit").onclick = () => fitLiveWindow();
+  d.addEventListener("keydown", e => {
+    if (!live) return;
+    if (e.key === "h" || e.key === "H") setMin(!live.min);
+    else if (e.key === "f" || e.key === "F") fitLiveWindow();
+    else if (e.key === "Escape") stopLive("Live stopped.");
+  });
+  pop.addEventListener("pagehide", () => { if (live && live.win === pop) stopLive("Live window closed."); });
+}
+
+/* Size the window so the cat sits in it 1:1. resizeTo takes the outer size, so
+   the OS title bar and frame have to be added back on. Minimised means the bar
+   is gone and the window is exactly the cat — nothing to crop out in OBS. */
+function fitLiveWindow() {
+  if (!live || !live.win || live.win.closed) return;
+  const pop = live.win;
+  const [w, h] = spriteSize();
+  if (!w || !h) return;
+  const bar = live.min ? 0 : ((pop.document.getElementById("bar") || {}).offsetHeight || 30);
+  const dw = Math.max(0, pop.outerWidth - pop.innerWidth);
+  const dh = Math.max(0, pop.outerHeight - pop.innerHeight);
+  const sc = pop.screen || { availWidth: 1920, availHeight: 1080 };
+  // browsers won't make a popup much smaller than 100px square, so asking for
+  // less is pointless — the canvas fills whatever we end up with anyway
+  const cw = clamp(w, 100, Math.max(100, (sc.availWidth || 1920) - dw - 20));
+  const ch = clamp(h + bar, 80, Math.max(80, (sc.availHeight || 1080) - dh - 20));
+  try { pop.resizeTo(Math.round(cw + dw), Math.round(ch + dh)); } catch (e) {}
+}
+
+/* The batch path sets the threshold from each new file's own noise floor, which
+   is the only sane default — where it sits is a property of the mic and the
+   room. Live has no file, so it gets there the only other way: listen to the
+   room for a moment. This runs automatically on going live, and again whenever
+   you ask, because a fan coming on is a different room. */
+function calibrateLive(auto) {
+  if (!live) return err("live", "Go live first — the room tone has to come off the mic that's running.");
+  live.cal = [];
+  msg("live", "work", "Listening to the room — stay quiet for a second…");
+  setTimeout(() => {
+    if (!live || !live.cal) return;
+    const s = live.cal.sort((a, b) => a - b);
+    live.cal = null;
+    if (s.length < 8) return err("live", "Didn't get enough audio to measure the room — is the window still open?");
+    // 90th percentile, not the max, so one chair creak doesn't set the gate
+    const t = clamp(Math.round(s[Math.floor(s.length * 0.9)] + 5), 2, 60);
+    $("thr").value = t;
+    $("thrV").textContent = t;
+    remap();
+    updateLiveMeters();
+    msg("live", "ok", `Live, threshold ${t} from your room. `
+      + (auto ? "Add the window to OBS as a window capture and chroma-key it. " : "")
+      + "If the mouth moves while you're quiet, nudge the threshold up — if it never opens, down.");
+  }, 1400);
+}
+
+function stopLive(note) {
+  if (!live) return;
+  const L = live;
+  live = null;                                 // stops the frame loop
+  clearInterval(L.beat);
+  try { (L.win.cancelAnimationFrame || cancelAnimationFrame).call(L.win, L.raf); } catch (e) {}
+  try { L.src.disconnect(); } catch (e) {}
+  // Release the device, or the browser keeps showing the recording indicator
+  // and the mic stays hot after you've stopped.
+  L.stream.getTracks().forEach(t => t.stop());
+  try { if (L.win && !L.win.closed) L.win.close(); } catch (e) {}
+  $("liveBtn").classList.remove("rec");
+  $("liveBtn").textContent = "Go live";
+  updateLiveMeters();
+  if (note) msg("live", "ok", note); else clearMsg("live");
+}
+
+/* ══════════════════════════════════════════════════════════
    7. demo assets — a throwaway sheet + clip, so the whole
       pipeline is testable before any real art exists
    ══════════════════════════════════════════════════════════ */
@@ -2207,7 +2755,7 @@ async function loadDemo() {
    8. messages + wiring
    ══════════════════════════════════════════════════════════ */
 
-const MSG_EL = { exp: "expMsg", slice: "sliceMsg", input: "inputMsg" };
+const MSG_EL = { exp: "expMsg", slice: "sliceMsg", input: "inputMsg", live: "liveMsg" };
 
 function msg(which, kind, text) {
   const el = $(MSG_EL[which] || "inputMsg");
@@ -2225,6 +2773,7 @@ function updateReady() {
   $("expPng").disabled = !ready;
   $("expWebm").disabled = !ready;
   $("playBtn").disabled = !S.audioBuffer;
+  $("liveBtn").disabled = !S.keyed.length;    // live needs frames, not audio
 }
 
 function wireDrop(el, accept, onFile) {
@@ -2282,6 +2831,15 @@ window.addEventListener("beforeunload", e => {
   if (rec || S.takeBlob) { e.preventDefault(); e.returnValue = ""; }
 });
 
+/* ── live wiring ── */
+$("liveBtn").addEventListener("click", startLive);
+$("liveBg").addEventListener("change", applyLiveBg);
+$("liveCal").addEventListener("click", () => calibrateLive(false));   // not the click Event
+// the pop-out is ours; don't leave it orphaned on the desktop
+window.addEventListener("pagehide", () => {
+  try { if (live && live.win && !live.win.closed) live.win.close(); } catch (e) {}
+});
+
 /* ── align wiring ── */
 $("prevFrame").addEventListener("click", () => selectFrame(S.sel - 1));
 $("nextFrame").addEventListener("click", () => selectFrame(S.sel + 1));
@@ -2297,33 +2855,27 @@ $("resetAll").addEventListener("click", () => { S.offsets = S.keyed.map(() => ({
 $("autoOne").addEventListener("click", () => autoAlignOne(S.sel, false));
 $("autoAll").addEventListener("click", autoAlignAll);
 
-/* drag the sprite directly — whole pixels only */
-(() => {
-  const cv = $("alignCv");
-  let dragging = false, sx = 0, sy = 0, startOffs = null;
-  cv.addEventListener("pointerdown", e => {
-    dragging = true; cv.classList.add("drag"); cv.setPointerCapture(e.pointerId);
-    sx = e.clientX; sy = e.clientY;
-    startOffs = S.offsets.map(o => ({ dx: o.dx, dy: o.dy }));   // drag from where we began
-    cv.focus();
-  });
-  cv.addEventListener("pointermove", e => {
-    if (!dragging || !startOffs) return;
-    const r = cv.getBoundingClientRect();
-    const px = (cv.width / r.width) / alignZoom;     // css px -> sprite px
-    const ddx = Math.round((e.clientX - sx) * px);
-    const ddy = Math.round((e.clientY - sy) * px);
+/* The align canvas: the cut, and otherwise the sprite. */
+wireCutDrag($("alignCv"), () => alignZoom, () => true, {
+  cursor: "grabbing",
+  start: () => S.offsets.map(o => ({ dx: o.dx, dy: o.dy })),   // drag from where we began
+  move: (startOffs, ddx, ddy) => {
+    if (!startOffs) return;
     const all = $("moveAll").checked;
     S.offsets = startOffs.map((o, i) =>
       (all || i === S.sel)
         ? clampOffset({ dx: o.dx + ddx, dy: o.dy + ddy })
         : { dx: o.dx, dy: o.dy });
     afterOffsetChange();
-  });
-  const end = e => { if (dragging) { dragging = false; cv.classList.remove("drag"); } };
-  cv.addEventListener("pointerup", end);
-  cv.addEventListener("pointercancel", end);
+  },
+});
 
+/* The preview: the cut only, and only while it's unlocked — once the cut is
+   locked the preview *is* the cut and there's nothing outside it to grab. */
+wireCutDrag($("preview"), () => parseInt($("scale").value, 10), () => !cutLocked(), null);
+
+(() => {
+  const cv = $("alignCv");
   cv.addEventListener("keydown", e => {
     // on a big sprite a 1px jump is invisible, so scale the coarse step
     const big = S.keyed.length ? Math.max(S.keyed[0].width, S.keyed[0].height) : 64;
@@ -2334,16 +2886,18 @@ $("autoAll").addEventListener("click", autoAlignAll);
 })();
 
 /* ── viewport wiring ── */
-["cropX", "cropY", "cropW", "cropH"].forEach(id =>
-  $(id).addEventListener("input", readCropInputs));
+["cropX", "cropY", "cropW", "cropH"].forEach(id => {
+  $(id).addEventListener("input", readCropInputs);
+  $(id).addEventListener("change", afterCutChange);   // committed, not mid-typing
+});
 $("lockView").addEventListener("change", () => {
   resizePreview();
   drawFrameAt(currentFrame());
 });
-$("fitCrop").addEventListener("click", () => fitCropToContent(1));
+$("fitCrop").addEventListener("click", () => { fitCropToContent(1); afterCutChange(); });
 $("fullCrop").addEventListener("click", () => {
-  S.crop = { x: 0, y: 0, w: S.cellW, h: S.cellH };
-  syncCropInputs(); resizePreview(); renderAlign(); drawFrameAt(currentFrame());
+  setCrop(0, 0, S.cellW, S.cellH);
+  afterCutChange();
 });
 
 /* ── slicing wiring ── */
@@ -2427,7 +2981,7 @@ $("evenGrid").addEventListener("click", () => {
   });
 })();
 
-$("key").addEventListener("input", applyKey);
+$("key").addEventListener("input", () => { applyKey(); applyLiveBg(); });
 $("tol").addEventListener("input", () => { $("tolV").textContent = $("tol").value; applyKey(); });
 $("feather").addEventListener("input", () => { $("featherV").textContent = $("feather").value; applyKey(); });
 $("despill").addEventListener("change", applyKey);
@@ -2437,8 +2991,14 @@ $("scale").addEventListener("input", () => {
 });
 $("checker").addEventListener("change", () => $("preview").classList.toggle("checker", $("checker").checked));
 $("fitView").addEventListener("change", () => $("preview").classList.toggle("fit", $("fitView").checked));
-$("fps").addEventListener("input", () => { $("fpsV").textContent = $("fps").value; analyze(); });
-$("thr").addEventListener("input", () => { $("thrV").textContent = $("thr").value; remap(); });
+// analyze() sets S.fps too, but it bails without audio — and live mode needs
+// the frame rate whether or not a file was ever loaded
+$("fps").addEventListener("input", () => {
+  $("fpsV").textContent = $("fps").value;
+  S.fps = parseInt($("fps").value, 10);
+  analyze();
+});
+$("thr").addEventListener("input", () => { $("thrV").textContent = $("thr").value; remap(); updateLiveMeters(); });
 $("hold").addEventListener("input", () => { $("holdV").textContent = $("hold").value; remap(); });
 $("demoBtn").addEventListener("click", () => { loadDemo().then(updateReady); });
 $("expPng").addEventListener("click", exportPNG);
@@ -2458,8 +3018,15 @@ $("wave").addEventListener("click", e => {
   drawWave(); drawFrameAt(currentFrame());
 });
 
-window.addEventListener("resize", drawWave);
+// a resize changes how much the canvases are being scaled down by, and the
+// grips are sized in screen pixels
+window.addEventListener("resize", () => {
+  drawWave();
+  measure($("preview")); measure($("alignCv"));
+  if (S.keyed.length) { drawFrameAt(currentFrame()); renderAlign(); }
+});
 drawWave();
+updateLiveMeters();   // puts the threshold tick where the slider already is
 </script>
 </body>
 </html>

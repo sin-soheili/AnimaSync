@@ -1,6 +1,6 @@
 # catsync
 
-Sprite sheet + audio → lip-synced animation, ready to drop over footage in your editor.
+Sprite sheet + audio → lip-synced animation, ready to drop over footage in your editor. Or point it at your mic and pop the cat out into its own window for a stream.
 
 ### → [alejandruxxug.github.io/Catsync](https://alejandruxxug.github.io/Catsync/)
 
@@ -16,6 +16,8 @@ Repo layout: `catsync.html` is the whole app. `index.html` is just the landing p
 2. Drag in your talking sprite sheet. It guesses the grid; fix it in **Slicing** if the guess is off.
 3. Hit **Record**, or drag in a WAV or MP3.
 4. Hit Play, tune, export.
+
+Or skip the audio entirely and hit **Go live** — see [Live](#live), below.
 
 ## Recording
 
@@ -77,7 +79,19 @@ The demo sheet ships with deliberate drift on cells 1–3 so you can see the fea
 
 ## Viewport
 
-The exported frame is a window onto the cell, not the whole cell — trim dead space or reframe to head-and-shoulders. Set X/Y/W/H in sprite pixels, or hit **Fit to content** for the union bounding box of every frame's opaque pixels with 1px padding. It's outlined in teal on the align canvas, with everything outside dimmed.
+The exported frame is a window onto the cell, not the whole cell — trim dead space or reframe to head-and-shoulders. It's outlined in teal on the align canvas, with everything outside dimmed.
+
+**Drag it on the preview.** That's the one that matters: hit Play and reframe against the animation actually running, rather than against one still frame in a small panel. It's also draggable on the align canvas, where it sits next to the onion skin. Same gesture either way:
+
+- **Any edge or corner** resizes that side of the cut. The left edge moves the left boundary and leaves the right one exactly where it was, which is what trimming dead space off one side actually needs. Corners take two sides at once. Four teal grips mark them, and the cursor tells you which you're on before you press.
+- **Shift-drag** the same edge or corner moves the whole cut without resizing it — for sliding a fixed output size around.
+- **Anywhere else** moves the sprite on the align canvas, and does nothing on the preview — aligning belongs in the align panel.
+
+The preview is draggable only while the cut is **unlocked**, because locking it makes the preview *become* the cut and there's nothing outside it left to grab. Unlock, reframe, lock to check.
+
+The cut is worked as four edges rather than as x/y/w/h, because clamping position and size separately would let a dragged edge slide its opposite. An edge stops one pixel short of the one across from it instead of passing through into a mirrored rectangle. Grips are pulled back inside the canvas when the cut is bigger than the cell, so an oversized cut whose corners are off in space is still grabbable.
+
+For exact numbers, set X/Y/W/H in sprite pixels, or hit **Fit to content** for the union bounding box of every frame's opaque pixels with 1px padding. Typed and dragged values run through the same clamp, so neither can reach a size the other can't.
 
 **The cut isn't applied while you edit.** Until you tick **Lock the cut**, the preview shows the whole frame with the viewport drawn as a guide — dimmed outside, teal outline — so a sprite you're dragging stays visible even when it currently falls outside the crop. Lock it to see the real cut. Either way, **exports always apply the viewport**; the lock only changes what the preview shows. The **Output** stat always reports the exported size, never the preview's.
 
@@ -102,6 +116,25 @@ Three things had to be handled to get the length right:
 - The encoder needs a moment to flush after the last frame, and going silent during that window leaves recorded time with no frames in it, which players render as a held frame. That produced a ~0.33s freeze at the end of every clip — absolute, not proportional, so it read as "the animation stops just before the end." The final frame is now re-emitted throughout the flush, and the duration written into the container is the length actually measured rather than the theoretical one.
 
 Still, the PNG sequence is the dependable export. Use WebM for quick checks.
+
+## Live
+
+**Go live** points the mic at the cat and puts it in a window of its own, animating in realtime. No audio file, no export step — add that window to OBS as a **window capture**, chroma-key the background, and it's a mouth that moves when you talk. It only needs a sprite sheet; everything about the audio side is skipped.
+
+In that window, **–** hides the control bar and shrinks it to exactly the cat, so there's nothing to crop out. **Fit** sizes it 1:1, **h** toggles the bar, **Esc** stops. Drag the window's edge and the cat scales to fill it — nearest-neighbour, so pixel art stays pixel art, though only *Fit* lands on whole pixels. The background is the key colour by default, the same thing the WebM export bakes in; green, black, and a checkerboard (for eyeballing alpha, not for capturing) are also there.
+
+**The threshold is set from your room automatically** when you go live, and again whenever you hit **Set threshold from room tone**. This is not optional politeness. Live has no file to measure, and with a fixed default a quiet room read as speech on **299 of 300 frames** in testing — the cat flapping at nothing. A second of listening dropped that to zero. Recalibrate when the room changes; a fan coming on is a different room.
+
+Two things work differently from the batch path, both because there is no future to look at:
+
+- **Loudness is normalized against a peak follower, not the 95th percentile of the file.** It rises toward a loud frame by a quarter of the distance per frame and falls back at 2dB/s. The soft attack is what stops one door slam setting the bar for the next ten seconds — the job the 95th percentile does when the whole file is available. And the reference is floored at a plausible speaking level rather than at silence: let it decay all the way down in a quiet room and it renormalizes the room's own hiss up to "shouting".
+- **The mapping is stepped on the fps grid, not the display's refresh rate.** Otherwise *min hold 2* would mean 2/60s on one machine and 2/30s on another, and settings that looked right live would look wrong in an export. It's the same state machine the batch path walks, called one frame at a time, so the two can't drift apart.
+
+The frame loop runs on the **pop-out's** animation clock rather than the main page's. A background tab is throttled to about 1fps, and the whole point is that the editor can sit behind OBS while the cat keeps moving. Keep the pop-out somewhere visible, though — a browser stops drawing a window that's minimized or completely covered, and no capture can fix that.
+
+Live and **Record** share one microphone, so starting either stops the other, and playback pauses when you go live — otherwise the speakers feed the mic.
+
+**Reframing while live works.** Drag any edge of the viewport on the align canvas and the pop-out follows as you go; the window around it resizes when you let go rather than on every pixel, so it isn't jittering about while you're still deciding. Same for the X/Y/W/H boxes: the cat reframes as you type, the window snaps once you commit.
 
 ## The three settings that matter
 

@@ -2,22 +2,52 @@
 
 Sprite sheet + audio → lip-synced animation, ready to drop over footage in your editor. Or point it at your mic and pop the cat out into its own window for a stream.
 
-### → [alejandruxxug.github.io/Catsync](https://alejandruxxug.github.io/Catsync/)
-
-Or download [`catsync.html`](https://github.com/alejandruxxug/Catsync/releases/latest) and double-click it. Same app either way — one file, vanilla JS, no dependencies, no build step, no server. Nothing you load ever leaves your machine; there's no network code in it at all.
+Or download the repo and open [`catsync.html`](catsync.html) — same app either way. Vanilla JS, no dependencies, no build step, no server. Nothing you load ever leaves your machine; there's no network code in it at all.
 
 Built for the cats in a class video about compilers, which is why frame 0 is "mouth closed" and everything is pixel-art shaped. It works on any sprite sheet.
 
-Repo layout: `catsync.html` is the whole app. `index.html` is just the landing page GitHub Pages serves at the root.
+Repo layout: `catsync.html` (markup + toolbar/modal shell), `styles.css`, and `src/*.js` (one file per concern) are the app — see [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit together and why it isn't a framework or ES modules. `index.html` is just the landing page GitHub Pages serves at the root.
+
+<p align="center">
+  <img src="screenshots/mobile-onboarding.png" width="230" alt="Onboarding screen, in Persian: pick a character image or add audio">
+  <img src="screenshots/mobile-preview.png" width="230" alt="Loaded preview with the export button front and center">
+  <img src="screenshots/mobile-frames.png" width="230" alt="Frame setup: drag any frame directly on the sheet to reshape or move it">
+</p>
+<p align="center">
+  <img src="screenshots/desktop.png" width="720" alt="Desktop layout, export dialog open over the preview">
+</p>
+
+## About this fork
+
+This is a fork of [alejandruxxug/Catsync](https://github.com/alejandruxxug/Catsync) ([live demo](https://alejandruxxug.github.io/Catsync/catsync.html)). All credit for the original design, the lip-sync algorithm, and the slicing/alignment/export pipeline goes to the original author — this fork's own writing is marked *(this fork)* below; everything else is the original project's documentation, describing logic that still works exactly as written.
+
+Two rounds of changes on top of the original:
+
+**A Persian interface, RTL, offline, single-license as before.** The UI is Persian by default (`<html lang="fa" dir="rtl">`), with numbers, coordinates and file names kept left-to-right and readable inside the RTL page.
+
+**A redesigned, mobile-first workflow**, because the original single dense control panel — accurate and complete as it was — asked a first-time visitor to understand audio thresholds, viewport internals and grid geometry before they'd exported a single frame. This fork now separates a **simple path** (pick a character image, add audio, nudge a frame if needed, export) from **everything else**, reachable but out of the way:
+
+- **A compact toolbar** (تصویر / صدا / فریم‌ها / تنظیمات بیشتر) replaces the old always-visible panel stack. Each button opens a focused sheet — bottom sheet on phones, centered dialog on desktop — for exactly one job.
+- **The preview is the main thing on screen.** Until a sprite sheet is loaded, it's replaced by a two-button onboarding card; nothing else is shown before that.
+- **Export is a primary, obvious action** — one pink button under the preview, "خروجی بگیر" — that opens a small dialog clearly separating the PNG sequence and the WebM export rather than burying both in a settings list.
+- **Independent per-frame crop** lives in the simple path now (the **فریم‌ها** sheet): grid slicing is still the default, but any frame's X/Y/width/height can be nudged on its own afterwards, for sheets that don't come back perfectly uniform.
+- **Everything technical** — sync thresholds, chroma keying, the exact viewport rect, onion-skin alignment, live mode — moved into one **تنظیمات بیشتر** (Advanced) sheet, organized as collapsible sections, first one open by default. The visual slicing grid itself stays in the simple **فریم‌ها** sheet, next to the per-frame crop editor — separating frames is core to the simple workflow, not an advanced tweak.
+- **Broad resets ask first.** Resetting every frame's alignment or the whole slicing grid shows a small in-app confirmation instead of acting immediately or using a browser `confirm()`.
+- A light, calm visual design replaces the earlier dark control-panel look — one accent color, generous spacing, no gradients or heavy shadows.
+
+Nothing about the audio analysis, the mapping, the export formats, or the lip-sync algorithm changed in either round — only how you reach them.
 
 ## Use
 
-1. **Load demo** to see the whole pipeline work before you have real art.
-2. Drag in your talking sprite sheet. It guesses the grid; fix it in **Slicing** if the guess is off.
-3. Hit **Record**, or drag in a WAV or MP3.
-4. Hit Play, tune, export.
+1. Open the app. If you have nothing ready yet, tap **«با یک نمونهٔ آماده امتحانش کن»** to see the whole pipeline work first.
+2. Tap **تصویر** and pick your talking sprite sheet — quietest frame first, widest last. The grid is guessed automatically.
+3. Tap **صدا** and either drag in a WAV/MP3 or record straight into the page.
+4. Press play, glance at the preview. If a frame's edges look wrong, open **فریم‌ها** and nudge that one frame's crop.
+5. Press **خروجی بگیر** and pick PNG sequence or WebM.
 
-Or skip the audio entirely and hit **Go live** — see [Live](#live), below.
+Everything else — exact viewport pixels, chroma key tuning, onion-skin alignment, live mode — is one tap away in **تنظیمات بیشتر**, not in the way until you ask for it.
+
+Or skip the audio entirely and hit **Go live** in Advanced — see [Live](#live), below.
 
 ## Recording
 
@@ -41,7 +71,9 @@ Frames must be ordered **quietest to loudest** — frame 0 is mouth closed, last
 
 A sheet is not always `W/cols × H/rows`. Generated ones come back with a margin around the outside, gutters between cells, or a size that just doesn't divide evenly — and refusing all three, which is what the old slicer did, meant reaching for a pixel editor before you could start.
 
-The grid is its own thing now: an **origin**, a **cell size**, and a **gutter**. Cols × rows only says how many cells to step through. The sheet is drawn with the grid on top, everything outside it dimmed and each cell numbered — drag the grid to move it, drag the pink handle on the first cell to resize every cell, or arrow-key the origin once the sheet is focused.
+The grid is its own thing now: an **origin**, a **cell size**, and a **gutter**. Cols × rows only says how many cells to step through. The sheet is drawn with the grid on top, everything outside it dimmed and each cell numbered.
+
+*(this fork)* **Click any frame directly on that sheet to select it** — same selection the thumbnail strip and the per-frame X/Y/width/height fields share — then drag its own edges to resize it or its body to move it, independent of every other frame. That's the primary way to fix one wrong cell; typing exact numbers is still there for precision. Dragging empty margin (outside every frame) moves the whole grid's origin instead, and arrow keys nudge whichever frame is currently selected.
 
 Which control does what:
 
@@ -60,6 +92,14 @@ Two things it has to get right:
 If the sprites touch with no gutter at all it finds one blob, and falls back to trimming the outer margin and dividing that by the cols you asked for. If the whole sheet reads as background, the key colour is wrong — fix it in **Look** and detect again.
 
 The demo loads a deliberately even grid, because auto-detect would trim it down to the sprites and hide the drift the align panel exists to fix.
+
+## Independent per-frame crop *(this fork)*
+
+The grid gives every cell the same size, which is right for a hand-drawn sheet but not always for a generated one — frame 2 might genuinely be 96px wide where its neighbours are 120px. Grid slicing stays the initial, default step; on top of it, each frame now carries its own crop rect that can be nudged independently, without touching any other frame.
+
+Open the **فریم‌ها** (Frames) sheet, pick a frame from the thumbnail strip, and adjust **X / Y / width / height** — the frame's own rect on the original sheet (sheet pixels, independent of the grid). Editing them re-cuts just that one frame; every other frame, the grid, the alignment offsets and the viewport are untouched. The reset button there puts it back to whatever the grid currently says that cell should be. (Alignment — nudging a frame's onion-skinned *position*, as opposed to its crop rect — is a separate, more occasional fix and lives in Advanced → تراز فریم‌ها; see below.)
+
+This sits *between* slicing and alignment in the pipeline — sheet → grid slicing → **per-frame crop** → alignment → viewport → export — so it composes with everything downstream: alignment offsets, the viewport, playback, PNG export, WebM export and Live mode all read the frame's actual (possibly resized) canvas, the same way they already did for a plain grid cell. Changing the grid (cols, rows, cell size, origin, gutter) rebuilds every frame's rect from scratch, so a per-frame tweak is scoped to the grid it was made against.
 
 ## Align — onion skin
 
@@ -152,6 +192,21 @@ Audio is downmixed to mono, split into one window per video frame, and each wind
 
 Real phoneme lip sync needs a transcript, and the cats are small on screen. This reads fine.
 
+## Persian interface, workflow & mobile layout *(this fork)*
+
+The interface is Persian by default (`<html lang="fa" dir="rtl">`) — there's no language switcher, since this fork targets Persian-speaking users specifically. Prose, labels, hints and every status/error/export message are in Persian, written as a Persian-speaking product designer would phrase them rather than translated word-for-word; numeric fields, coordinates, `dx`/`dy` readouts, file names and frame indices stay left-to-right (`direction: ltr` scoped to those elements) so a value like `-12` or `catsync_120f_30fps.zip` reads correctly inside the RTL page. No web font is loaded — that would need a network fetch and break offline use — so Persian text renders with the system's own UI font (Tahoma / Segoe UI / the OS default).
+
+**The workflow is split into a simple path and an Advanced sheet**, on the premise that a first-time visitor should understand what to do within seconds, without reading about audio thresholds or viewport internals first. A compact toolbar (تصویر / صدا / فریم‌ها / تنظیمات بیشتر) replaces the old always-visible stack of panels; each button opens one focused sheet — a bottom sheet under 640px, a centered dialog above it, same markup either way, `styles.css` just switches the layout. The preview stays the dominant thing on the main screen at all times; before a sprite sheet is loaded it's replaced by a two-button onboarding card instead of an empty canvas and forty settings. Export is one pink button under the preview that opens a small dialog distinguishing the PNG sequence from the WebM export, rather than one more item in a settings list.
+
+<p align="center">
+  <img src="screenshots/mobile-advanced.png" width="230" alt="Advanced sheet: collapsible sections for sync, keying, viewport, alignment and live mode">
+  <img src="screenshots/mobile-export.png" width="230" alt="Export dialog: PNG sequence and WebM as two clearly separated options">
+</p>
+
+Inside Advanced, sections are native `<details>`/`<summary>` accordions rather than custom JS toggles — sync/threshold settings open by default, chroma keying / final viewport crop / onion-skin alignment / live mode collapsed. That's also what keeps a stray tap from reaching a control you didn't mean to touch: a `<summary>` only ever toggles its own section, never something nested inside it. The one thing that's *not* in Advanced is slicing itself: the visual, draggable grid that actually separates the sheet into frames lives in the **فریم‌ها** sheet, always visible, right above the per-frame crop editor — it's the more fundamental of the two "manual frame" tools, so it stays in the simple path rather than behind one more tap. The whole layout is designed mobile-first from 360px up through desktop, with 44px-minimum touch targets, wrapping rows, and no control that can force horizontal scrolling.
+
+Two reset actions are broad enough to lose real work — **Reset all offsets** (every frame's alignment) and **Reset to even grid** (the whole slicing grid, including any per-frame crop) — so both are visually set apart from the normal buttons (a dashed "danger zone" divider, a distinct color) and ask for confirmation in a small in-app dialog before doing anything, instead of a browser `confirm()` popup or no confirmation at all.
+
 ## Notes
 
 - Changing threshold, hold, or scale only redoes the cheap mapping step — the audio is decoded and analyzed once.
@@ -162,4 +217,6 @@ Real phoneme lip sync needs a transcript, and the cats are small on screen. This
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Take it, change it, ship it.
+MIT — see [LICENSE](LICENSE), unchanged from the original project. Take it, change it, ship it.
+
+Original project: [alejandruxxug/Catsync](https://github.com/alejandruxxug/Catsync), MIT licensed. This fork modifies `catsync.html` and this README; the original author's copyright notice in [LICENSE](LICENSE) is preserved as-is.
